@@ -526,6 +526,12 @@ window.IVP_DATA = {"sections": [{"id": "ivp-database", "name": "IVP Database", "
       { key: "Product Type", label: "Product Type", sources: [{ sheet: "Branded products", column: "Product Type" }] },
       { key: "Format", label: "Format", sources: [{ sheet: "Branded products", column: "Format" }] },
     ],
+    "formats-tech": [
+      { key: "Institute", label: "Institute", sources: [{ sheet: null, column: "Institute" }] },
+      { key: "Category", label: "Category", sources: [{ sheet: null, column: "Category" }] },
+      { key: "Target Group", label: "Target Group", sources: [{ sheet: null, column: "TG" }] },
+      { key: "Target", label: "Target", sources: [{ sheet: null, column: "Target" }] },
+    ],
   };
 
   const state = {
@@ -574,6 +580,10 @@ window.IVP_DATA = {"sections": [{"id": "ivp-database", "name": "IVP Database", "
       .split(/\s*[,;]\s*/)
       .map(t => t.trim())
       .filter(Boolean);
+  }
+
+  function normalizeToken(t) {
+    return t.toLowerCase();
   }
 
   function getCurrentSection() {
@@ -652,15 +662,29 @@ window.IVP_DATA = {"sections": [{"id": "ivp-database", "name": "IVP Database", "
       if (avgLen > FREE_TEXT_AVG_LEN) return null;
     }
 
-    const tokenCounts = new Map(); // token -> Set of row ids that contain it
+    // Group tokens case-insensitively (so "Gut health" and "gut health" become one
+    // option) while keeping whichever original casing was most common as the label.
+    const tokenCounts = new Map(); // normalizedToken -> { label, idSet, labelTally: Map(rawLabel->count) }
     for (const row of rows) {
       const rowValues = getValuesForDef(def, row);
       if (rowValues.length === 0) continue;
-      const tokens = new Set(rowValues.flatMap(tokenize));
-      for (const tok of tokens) {
-        if (!tokenCounts.has(tok)) tokenCounts.set(tok, new Set());
-        tokenCounts.get(tok).add(row._id);
+      const rawTokens = new Set(rowValues.flatMap(tokenize));
+      for (const raw of rawTokens) {
+        const norm = normalizeToken(raw);
+        if (!tokenCounts.has(norm)) tokenCounts.set(norm, { label: raw, idSet: new Set(), labelTally: new Map() });
+        const entry = tokenCounts.get(norm);
+        entry.idSet.add(row._id);
+        entry.labelTally.set(raw, (entry.labelTally.get(raw) || 0) + 1);
       }
+    }
+    // finalize each group's display label as whichever casing variant occurred most often
+    for (const entry of tokenCounts.values()) {
+      let bestLabel = entry.label, bestCount = -1;
+      for (const [label, count] of entry.labelTally) {
+        if (count > bestCount || (count === bestCount && label < bestLabel)) { bestLabel = label; bestCount = count; }
+      }
+      entry.label = bestLabel;
+      delete entry.labelTally;
     }
 
     const uniqueTokenCount = tokenCounts.size;
@@ -684,7 +708,7 @@ window.IVP_DATA = {"sections": [{"id": "ivp-database", "name": "IVP Database", "
       if (!def) continue; // filter no longer applicable in this view; ignore rather than exclude everything
       const rowValues = getValuesForDef(def, row);
       if (rowValues.length === 0) return false;
-      const tokens = rowValues.flatMap(tokenize);
+      const tokens = rowValues.flatMap(tokenize).map(normalizeToken);
       const hit = tokens.some(t => selected.has(t));
       if (!hit) return false;
     }
@@ -720,7 +744,7 @@ window.IVP_DATA = {"sections": [{"id": "ivp-database", "name": "IVP Database", "
   function renderFilters(searchFilteredRows, activeSheets) {
     const activeSheetKeys = new Set(activeSheets.map(s => s.key));
     const curatedSpec = (CURATED_FILTERS[state.sectionId] || [])
-      .filter(def => def.sources.some(src => activeSheetKeys.has(src.sheet)));
+      .filter(def => def.sources.some(src => src.sheet === null || activeSheetKeys.has(src.sheet)));
 
     const curatedFacets = curatedSpec
       .map(def => computeFacetForDef(def, searchFilteredRows, { bypassCardinalityCap: true }))
@@ -760,7 +784,7 @@ window.IVP_DATA = {"sections": [{"id": "ivp-database", "name": "IVP Database", "
     const label = facet.def.label;
     const selected = state.filters[key] || new Set();
     const entries = Array.from(facet.tokenCounts.entries())
-      .sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]));
+      .sort((a, b) => b[1].idSet.size - a[1].idSet.size || a[1].label.localeCompare(b[1].label));
 
     const groupId = `fg-${key}`.replace(/[^a-zA-Z0-9-]/g, "_");
     const visible = entries.slice(0, FACET_MAX_VISIBLE);
@@ -778,12 +802,13 @@ window.IVP_DATA = {"sections": [{"id": "ivp-database", "name": "IVP Database", "
   }
 
   function renderFacetOptions(entries, key, selectedSet) {
-    return entries.map(([token, idSet]) => {
-      const checked = selectedSet.has(token) ? "checked" : "";
-      const safeVal = escapeHtml(token);
+    return entries.map(([normToken, { label, idSet }]) => {
+      const checked = selectedSet.has(normToken) ? "checked" : "";
+      const safeToken = escapeHtml(normToken);
+      const safeLabel = escapeHtml(label);
       return `<label class="facet-option">
-        <input type="checkbox" data-key="${escapeHtml(key)}" data-token="${safeVal}" ${checked}>
-        <span class="facet-label">${safeVal}</span>
+        <input type="checkbox" data-key="${escapeHtml(key)}" data-token="${safeToken}" ${checked}>
+        <span class="facet-label">${safeLabel}</span>
         <span class="facet-count">${idSet.size}</span>
       </label>`;
     }).join("");
